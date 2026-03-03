@@ -22,6 +22,7 @@ end
 local PlayerAction    = makeEvent("PlayerAction")
 local GameStateSync   = makeEvent("GameStateSync")
 local GamePhaseChanged = makeEvent("GamePhaseChanged")
+local DebugAction     = makeEvent("DebugAction")
 
 -- ============================================================
 -- 定数
@@ -180,6 +181,22 @@ local function handContains(hand, cards)
 		if not found then return false end
 	end
 	return true
+end
+
+-- 他プレイヤーの手札から条件に合うカードを1枚奪って返す（なければ nil）
+local function stealCard(toId, predicate)
+	for _, p in ipairs(state.players) do
+		if p.id ~= toId then
+			local hand = state.hands[p.id] or {}
+			for i, c in ipairs(hand) do
+				if predicate(c) then
+					table.remove(hand, i)
+					return c
+				end
+			end
+		end
+	end
+	return nil
 end
 
 -- ============================================================
@@ -536,6 +553,58 @@ PlayerAction.OnServerEvent:Connect(function(robloxPlayer, data)
 				processNpcTurn(state.currentId)
 			end)
 		end
+	end
+end)
+
+-- ============================================================
+-- デバッグ用ハンドラ
+-- ============================================================
+
+DebugAction.OnServerEvent:Connect(function(robloxPlayer, actionType)
+	if state.phase ~= "playing" then return end
+
+	local playerInfo = nil
+	for _, p in ipairs(state.players) do
+		if not p.isNPC and p.name == robloxPlayer.Name then
+			playerInfo = p
+			break
+		end
+	end
+	if not playerInfo then return end
+
+	local myId = playerInfo.id
+	local added = false
+
+	if actionType == "add8" then
+		local c = stealCard(myId, function(card)
+			return card.number == 8 and card.suit ~= CardData.SUIT.JOKER
+		end)
+		if c then table.insert(state.hands[myId], c); added = true end
+
+	elseif actionType == "addSpade3" then
+		local c = stealCard(myId, function(card)
+			return card.suit == CardData.SUIT.SPADE and card.number == 3
+		end)
+		if c then table.insert(state.hands[myId], c); added = true end
+
+	elseif actionType == "addJoker" then
+		local c = stealCard(myId, function(card)
+			return card.suit == CardData.SUIT.JOKER
+		end)
+		if c then table.insert(state.hands[myId], c); added = true end
+
+	elseif actionType == "add4x10" then
+		for _ = 1, 4 do
+			local c = stealCard(myId, function(card)
+				return card.number == 10 and card.suit ~= CardData.SUIT.JOKER
+			end)
+			if c then table.insert(state.hands[myId], c); added = true end
+		end
+	end
+
+	if added then
+		state.hands[myId] = CardData.sortHand(state.hands[myId], false)
+		syncAll()
 	end
 end)
 
