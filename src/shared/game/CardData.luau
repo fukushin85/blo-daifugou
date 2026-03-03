@@ -90,29 +90,48 @@ function CardData.getStrength(card, isRevolution)
 	return base
 end
 
+-- セット全体の強さを返す（ジョーカーを含む場合はジョーカー強さを使用）
+function CardData.getSetStrength(cards, isRevolution)
+	for _, c in ipairs(cards) do
+		if c.suit == CardData.SUIT.JOKER then
+			return isRevolution and 0 or CardData.JOKER_STRENGTH
+		end
+	end
+	return CardData.getStrength(cards[1], isRevolution)
+end
+
 -- played（配列）が field（配列）より強いか判定
 -- 枚数が異なる場合は false を返す
 function CardData.beats(played, field, isRevolution)
 	if #played ~= #field then return false end
 	if #played == 0 then return false end
-	-- 同枚数のセット同士はカード1枚の強さで比較（全て同数字）
-	return CardData.getStrength(played[1], isRevolution)
-		 > CardData.getStrength(field[1], isRevolution)
+	return CardData.getSetStrength(played, isRevolution)
+		 > CardData.getSetStrength(field, isRevolution)
 end
 
 -- ============================================================
 -- バリデーション
 -- ============================================================
 
--- 出せるカードセットかチェック（Phase 1: 全て同じ数字）
+-- 出せるカードセットかチェック（全て同じ数字、またはジョーカー1枚 + 同じ数字）
 function CardData.isValidSet(cards)
 	if #cards == 0 then return false end
 	if #cards == 1 then return true end
-	local firstNumber = cards[1].number
-	for i = 2, #cards do
-		if cards[i].number ~= firstNumber then return false end
+	-- ジョーカーは1枚だけワイルドカードとして使用可能
+	local jokerCount = 0
+	local baseNumber = nil
+	for _, c in ipairs(cards) do
+		if c.suit == CardData.SUIT.JOKER then
+			jokerCount = jokerCount + 1
+		else
+			if baseNumber == nil then
+				baseNumber = c.number
+			elseif c.number ~= baseNumber then
+				return false
+			end
+		end
 	end
-	return true
+	return jokerCount <= 1
 end
 
 -- ============================================================
@@ -132,6 +151,60 @@ function CardData.sortHand(hand, isRevolution)
 		return CardData.getStrength(a, isRevolution) < CardData.getStrength(b, isRevolution)
 	end)
 	return sorted
+end
+
+-- ============================================================
+-- 特殊ルール判定
+-- ============================================================
+
+-- スペ3返し：ジョーカー1枚出しに対してスペードの3で返せるか
+function CardData.isSpade3Return(played, field)
+	if #played ~= 1 or #field ~= 1 then return false end
+	return played[1].suit == CardData.SUIT.SPADE and played[1].number == 3
+		and field[1].suit == CardData.SUIT.JOKER
+end
+
+-- 8切り：出したカードが全て8か（ジョーカー不可）
+function CardData.isEightCut(cards)
+	if #cards == 0 then return false end
+	for _, c in ipairs(cards) do
+		if c.suit == CardData.SUIT.JOKER or c.number ~= 8 then return false end
+	end
+	return true
+end
+
+-- 革命：ジョーカーを含まない同じ数字4枚
+function CardData.isRevolutionPlay(cards)
+	if #cards ~= 4 then return false end
+	local baseNumber = nil
+	for _, c in ipairs(cards) do
+		if c.suit == CardData.SUIT.JOKER then return false end
+		if baseNumber == nil then
+			baseNumber = c.number
+		elseif c.number ~= baseNumber then
+			return false
+		end
+	end
+	return true
+end
+
+-- 反則あがり判定
+-- isEightCutPlay     : 出した手が8切りを発動したか
+-- isSpade3ReturnPlay : 出した手がスペ3返しだったか
+function CardData.isFoulWin(cards, isEightCutPlay, isSpade3ReturnPlay, isRevolution)
+	if #cards == 0 then return false end
+	-- ジョーカーを含む手でのあがり → 反則
+	for _, c in ipairs(cards) do
+		if c.suit == CardData.SUIT.JOKER then return true end
+	end
+	-- 8切り発動でのあがり → 反則
+	if isEightCutPlay then return true end
+	-- スペ3返しでのあがり → 反則
+	if isSpade3ReturnPlay then return true end
+	-- 最強数字カード（強さ13）でのあがり → 反則
+	-- 通常時: 2（strength=13）、革命中: 3（strength=14-1=13）
+	local strength = CardData.getSetStrength(cards, isRevolution)
+	return strength == 13
 end
 
 return CardData

@@ -44,8 +44,15 @@ local state = {
 	fieldOwnerId  = nil,      -- 場のカードを出したプレイヤーID
 	currentId     = nil,      -- 現在のターンのプレイヤーID
 	passCount     = 0,        -- 最後の出し以降の連続パス数
-	rankings      = {},       -- 上がり順 [rank] = playerId
+	rankings      = {},       -- 正常あがり順 [rank] = playerId
+	foulRankings  = {},       -- 反則あがり順（ゲーム終了時に末尾に追加）
 	isRevolution  = false,
+	notification  = nil,      -- クライアントへの通知メッセージ（送信後クリア）
+	rules = {                 -- 特殊ルール設定（Phase 5 でロビーから上書き）
+		revolution = true,
+		eightCut   = true,
+		spade3     = true,
+	},
 }
 
 -- ============================================================
@@ -94,6 +101,9 @@ end
 -- ============================================================
 
 local function syncAll()
+	local notification = state.notification
+	state.notification = nil  -- 1回送信したらクリア
+
 	local playerList = {}
 	for _, p in ipairs(state.players) do
 		table.insert(playerList, {
@@ -114,6 +124,7 @@ local function syncAll()
 				players      = playerList,
 				isRevolution = state.isRevolution,
 				rankings     = state.rankings,
+				notification = notification,
 			})
 		end
 	end
@@ -182,12 +193,25 @@ local function finishPlayer(playerId)
 	table.insert(state.rankings, playerId)
 end
 
+-- 反則あがり処理：強制最下位化
+local function handleFoulWin(playerId)
+	local p = getPlayer(playerId)
+	if not p or p.isFinished then return end
+	p.isFinished = true
+	table.insert(state.foulRankings, playerId)
+	state.notification = p.name .. " が反則あがり！最下位になりました"
+end
+
 -- ゲーム終了判定。終了なら true を返す
 local function checkGameEnd()
 	local active = getActivePlayers()
 	if #active <= 1 then
 		if #active == 1 then
 			finishPlayer(active[1].id)
+		end
+		-- 反則あがりプレイヤーを末尾（最下位）に追加
+		for _, foulId in ipairs(state.foulRankings) do
+			table.insert(state.rankings, foulId)
 		end
 		state.phase = "result"
 		broadcastPhase("result")
@@ -212,9 +236,13 @@ local function validatePlay(playerId, cards)
 		return false, "Card not in hand"
 	end
 	if not CardData.isValidSet(cards) then
-		return false, "Cards must all be the same number"
+		return false, "Invalid card set"
 	end
 	if #state.field > 0 then
+		-- スペ3返しは通常の強さ比較を免除
+		if state.rules.spade3 and CardData.isSpade3Return(cards, state.field) then
+			return true, nil
+		end
 		if #cards ~= #state.field then
 			return false, "Must play same count as field"
 		end
@@ -230,17 +258,56 @@ end
 -- ============================================================
 
 local function doPlay(playerId, cards)
-	state.hands[playerId] = removeCards(state.hands[playerId], cards)
-	state.field       = cards
-	state.fieldOwnerId = playerId
-	state.passCount   = 0
+	-- 特殊ルール判定
+	local isEightCutPlay     = state.rules.eightCut  and CardData.isEightCut(cards)
+	local isSpade3ReturnPlay = state.rules.spade3    and CardData.isSpade3Return(cards, state.field)
+	local isRevPlay          = state.rules.revolution and CardData.isRevolutionPlay(cards)
 
-	if #state.hands[playerId] == 0 then
-		finishPlayer(playerId)
-		if checkGameEnd() then return end
+	-- 手札からカードを除去
+	state.hands[playerId] = removeCards(state.hands[playerId], cards)
+
+	-- 反則あがり判定は革命トグル前の状態で行う
+	local handEmpty = (#state.hands[playerId] == 0)
+	local isFoul = handEmpty
+		and CardData.isFoulWin(cards, isEightCutPlay, isSpade3ReturnPlay, state.isRevolution)
+
+	-- 革命トグル
+	if isRevPlay then
+		state.isRevolution = not state.isRevolution
+		local notif = state.isRevolution and "革命！" or "逆革命！"
+		-- 既存通知があれば末尾に追記（8切り同時など）
+		state.notification = state.notification and (state.notification .. "  " .. notif) or notif
 	end
 
-	state.currentId = getNextActiveId(playerId)
+	-- 場を更新
+	state.field        = cards
+	state.fieldOwnerId = playerId
+	state.passCount    = 0
+
+	if handEmpty then
+		if isFoul then
+			-- 反則あがり: 強制最下位・場リセット・次プレイヤーへ
+			handleFoulWin(playerId)
+			state.field        = {}
+			state.fieldOwnerId = nil
+			state.currentId    = getNextActiveId(playerId)
+			if checkGameEnd() then return end
+		else
+			-- 正常あがり
+			finishPlayer(playerId)
+			if checkGameEnd() then return end
+			state.currentId = getNextActiveId(playerId)
+		end
+	elseif isEightCutPlay then
+		-- 8切り: 場リセット・同プレイヤーが続行
+		state.field        = {}
+		state.fieldOwnerId = nil
+		state.passCount    = 0
+		state.currentId    = playerId
+	else
+		state.currentId = getNextActiveId(playerId)
+	end
+
 	syncAll()
 end
 
@@ -271,6 +338,15 @@ end
 -- ============================================================
 
 local function npcChooseCards(hand, field, isRevolution)
+	-- スペ3返し: 場がジョーカー1枚なら♠3で返す
+	if state.rules.spade3 and #field == 1 and field[1].suit == CardData.SUIT.JOKER then
+		for _, c in ipairs(hand) do
+			if c.suit == CardData.SUIT.SPADE and c.number == 3 then
+				return { c }
+			end
+		end
+	end
+
 	if #field == 0 then
 		-- 空き場: 最弱の1枚を出す
 		local sorted = CardData.sortHand(hand, isRevolution)
@@ -303,11 +379,23 @@ local function npcChooseCards(hand, field, isRevolution)
 
 	if #validPlays == 0 then return nil end
 
-	-- 最も弱い有効手を選ぶ
+	-- 強さ昇順でソート（getSetStrength でジョーカー考慮）
 	table.sort(validPlays, function(a, b)
-		return CardData.getStrength(a[1], isRevolution)
-			 < CardData.getStrength(b[1], isRevolution)
+		return CardData.getSetStrength(a, isRevolution)
+			 < CardData.getSetStrength(b, isRevolution)
 	end)
+
+	-- 最後の1手で反則あがりになる場合は回避を試みる
+	if neededCount == #hand then
+		for _, play in ipairs(validPlays) do
+			local isEC = state.rules.eightCut and CardData.isEightCut(play)
+			local isSR = state.rules.spade3   and CardData.isSpade3Return(play, field)
+			if not CardData.isFoulWin(play, isEC, isSR, isRevolution) then
+				return play
+			end
+		end
+	end
+
 	return validPlays[1]
 end
 
@@ -388,7 +476,9 @@ local function startGame(humanPlayer)
 	state.fieldOwnerId = nil
 	state.passCount    = 0
 	state.rankings     = {}
+	state.foulRankings = {}
 	state.isRevolution = false
+	state.notification = nil
 
 	dealCards()
 
