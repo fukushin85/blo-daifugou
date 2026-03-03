@@ -19,6 +19,7 @@ end
 local PlayerAction     = waitForEvent("PlayerAction")
 local GameStateSync    = waitForEvent("GameStateSync")
 local GamePhaseChanged = waitForEvent("GamePhaseChanged")
+local DebugAction      = waitForEvent("DebugAction")
 
 -- ============================================================
 -- UI 構築
@@ -129,6 +130,68 @@ local messageLabel = makeLabel("", UDim2.new(1, 0, 0.08, 0), UDim2.new(0, 0, 0.4
 	Color3.fromRGB(80, 40, 0))
 messageLabel.Visible = false
 
+-- 通知ラベル（革命・反則あがりなど、3秒表示）
+local notifLabel = makeLabel("", UDim2.new(1, 0, 0.06, 0), UDim2.new(0, 0, 0.38, 0), screenGui,
+	Color3.fromRGB(180, 60, 0))
+notifLabel.Visible = false
+notifLabel.ZIndex = 5
+
+-- ---- デバッグUI ----
+
+local debugBtn = makeButton("DEBUG", UDim2.fromOffset(80, 26), UDim2.new(0.5, -40, 0, 2), screenGui)
+debugBtn.BackgroundColor3 = Color3.fromRGB(80, 60, 100)
+debugBtn.ZIndex = 20
+
+local debugMenu = Instance.new("Frame")
+debugMenu.Size = UDim2.fromOffset(210, 10)  -- 高さは AutomaticSize で自動調整
+debugMenu.AutomaticSize = Enum.AutomaticSize.Y
+debugMenu.Position = UDim2.new(0.5, -105, 0, 30)
+debugMenu.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+debugMenu.BackgroundTransparency = 0.1
+debugMenu.Visible = false
+debugMenu.ZIndex = 20
+debugMenu.Parent = screenGui
+
+local debugPad = Instance.new("UIPadding")
+debugPad.PaddingTop    = UDim.new(0, 4)
+debugPad.PaddingBottom = UDim.new(0, 4)
+debugPad.PaddingLeft   = UDim.new(0, 4)
+debugPad.PaddingRight  = UDim.new(0, 4)
+debugPad.Parent = debugMenu
+
+local debugLayout = Instance.new("UIListLayout")
+debugLayout.FillDirection = Enum.FillDirection.Vertical
+debugLayout.Padding = UDim.new(0, 4)
+debugLayout.Parent = debugMenu
+
+local debugItems = {
+	{ "8 を追加",      "add8"      },
+	{ "♠3 を追加",    "addSpade3" },
+	{ "Joker を追加",  "addJoker"  },
+	{ "10 を 4 枚追加", "add4x10"  },
+}
+
+for _, item in ipairs(debugItems) do
+	local btn = Instance.new("TextButton")
+	btn.Text = item[1]
+	btn.Size = UDim2.new(1, 0, 0, 34)
+	btn.BackgroundColor3 = Color3.fromRGB(70, 70, 90)
+	btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btn.TextScaled = true
+	btn.Font = Enum.Font.Gotham
+	btn.ZIndex = 21
+	btn.Parent = debugMenu
+	local action = item[2]
+	btn.MouseButton1Click:Connect(function()
+		debugMenu.Visible = false
+		DebugAction:FireServer(action)
+	end)
+end
+
+debugBtn.MouseButton1Click:Connect(function()
+	debugMenu.Visible = not debugMenu.Visible
+end)
+
 -- ============================================================
 -- 状態
 -- ============================================================
@@ -152,6 +215,7 @@ end
 
 local function toggleSelect(card)
 	local key = cardKey(card)
+	local isJoker = (card.suit == CardData.SUIT.JOKER)
 
 	-- すでに選択済み → 解除
 	if selectedCards[key] then
@@ -159,15 +223,23 @@ local function toggleSelect(card)
 		return
 	end
 
-	-- 現在の選択カードの数字を取得
-	local selectedNumber = nil
-	for _, sc in pairs(selectedCards) do
-		selectedNumber = sc.number
-		break
+	if isJoker then
+		-- ジョーカーはどの選択にもワイルドカードとして追加可能
+		selectedCards[key] = card
+		return
 	end
 
-	-- 選択済みカードと数字が異なる → 選択をリセットして新しいカードだけ選択
-	if selectedNumber ~= nil and card.number ~= selectedNumber then
+	-- 非ジョーカー: 選択中の非ジョーカーカードのベース数字を確認
+	local baseNumber = nil
+	for _, sc in pairs(selectedCards) do
+		if sc.suit ~= CardData.SUIT.JOKER then
+			baseNumber = sc.number
+			break
+		end
+	end
+
+	-- 異なる数字のカードをクリック → 選択をリセットして新しいカードだけ選択
+	if baseNumber ~= nil and card.number ~= baseNumber then
 		selectedCards = {}
 	end
 
@@ -361,6 +433,15 @@ GameStateSync.OnClientEvent:Connect(function(data)
 		end
 		rankingsLabel.Text = "上がり順: " .. table.concat(parts, " → ")
 		rankingsLabel.Visible = true
+	end
+
+	-- 通知表示（革命・反則あがりなど）
+	if data.notification and data.notification ~= "" then
+		notifLabel.Text = data.notification
+		notifLabel.Visible = true
+		task.delay(3, function()
+			notifLabel.Visible = false
+		end)
 	end
 
 	-- 手札を再描画（選択状態を維持）
