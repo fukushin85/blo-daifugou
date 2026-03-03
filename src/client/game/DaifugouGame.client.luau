@@ -152,11 +152,26 @@ end
 
 local function toggleSelect(card)
 	local key = cardKey(card)
+
+	-- すでに選択済み → 解除
 	if selectedCards[key] then
 		selectedCards[key] = nil
-	else
-		selectedCards[key] = card
+		return
 	end
+
+	-- 現在の選択カードの数字を取得
+	local selectedNumber = nil
+	for _, sc in pairs(selectedCards) do
+		selectedNumber = sc.number
+		break
+	end
+
+	-- 選択済みカードと数字が異なる → 選択をリセットして新しいカードだけ選択
+	if selectedNumber ~= nil and card.number ~= selectedNumber then
+		selectedCards = {}
+	end
+
+	selectedCards[key] = card
 end
 
 local function getSelectedList()
@@ -264,7 +279,7 @@ local function refreshCardButtons()
 	end
 end
 
-local function refreshOpponents(players)
+local function refreshOpponents(players, currentTurn)
 	-- 相手プレイヤー情報を更新
 	for _, child in ipairs(opponentFrame:GetChildren()) do
 		child:Destroy()
@@ -278,16 +293,19 @@ local function refreshOpponents(players)
 	end
 
 	for i, p in ipairs(others) do
+		local isCurrentTurn = (p.name == currentTurn)
 		local label = Instance.new("TextLabel")
 		label.Size     = UDim2.new(1 / #others, -4, 1, 0)
 		label.Position = UDim2.new((i - 1) / #others, 2, 0, 0)
 		local status = p.isFinished and "（上がり）" or (tostring(p.handCount) .. "枚")
-		label.Text     = p.name .. ": " .. status
-		label.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
-		label.BackgroundTransparency = 0.3
+		label.Text     = (isCurrentTurn and "▶ " or "") .. p.name .. ": " .. status
+		label.BackgroundColor3 = isCurrentTurn
+			and Color3.fromRGB(80, 190, 220)   -- 手番中: 水色
+			or  Color3.fromRGB(40, 40, 60)
+		label.BackgroundTransparency = isCurrentTurn and 0 or 0.3
 		label.TextColor3 = Color3.fromRGB(255, 255, 255)
 		label.TextScaled = true
-		label.Font = Enum.Font.Gotham
+		label.Font = isCurrentTurn and Enum.Font.GothamBold or Enum.Font.Gotham
 		label.Parent = opponentFrame
 	end
 end
@@ -331,8 +349,8 @@ GameStateSync.OnClientEvent:Connect(function(data)
 		fieldLabel.Text = fieldStr
 	end
 
-	-- 相手の手札枚数
-	refreshOpponents(data.players)
+	-- 相手の手札枚数（手番プレイヤーをハイライト）
+	refreshOpponents(data.players, data.turn)
 
 	-- 順位表示（rankings は playerName の配列として扱う、Phase 1 簡易版）
 	if #data.rankings > 0 then
