@@ -20,6 +20,7 @@ local PlayerAction     = waitForEvent("PlayerAction")
 local GameStateSync    = waitForEvent("GameStateSync")
 local GamePhaseChanged = waitForEvent("GamePhaseChanged")
 local DebugAction      = waitForEvent("DebugAction")
+local CardExchange     = waitForEvent("CardExchange")
 
 -- ============================================================
 -- UI 構築
@@ -136,6 +137,25 @@ local notifLabel = makeLabel("", UDim2.new(1, 0, 0.06, 0), UDim2.new(0, 0, 0.38,
 notifLabel.Visible = false
 notifLabel.ZIndex = 5
 
+-- 結果表示オーバーレイ（result / finalResult フェーズで使用）
+local resultFrame = Instance.new("Frame")
+resultFrame.Size = UDim2.new(0.6, 0, 0.6, 0)
+resultFrame.Position = UDim2.new(0.2, 0, 0.15, 0)
+resultFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 40)
+resultFrame.BackgroundTransparency = 0.1
+resultFrame.Visible = false
+resultFrame.ZIndex = 15
+resultFrame.Parent = screenGui
+
+local resultTitle = makeLabel("", UDim2.new(1, 0, 0.15, 0), UDim2.new(0, 0, 0, 0), resultFrame,
+	Color3.fromRGB(40, 40, 80))
+resultTitle.ZIndex = 16
+
+local resultBody = makeLabel("", UDim2.new(1, 0, 0.85, 0), UDim2.new(0, 0, 0.15, 0), resultFrame,
+	Color3.fromRGB(20, 20, 40))
+resultBody.ZIndex = 16
+resultBody.TextYAlignment = Enum.TextYAlignment.Top
+
 -- ---- デバッグUI ----
 
 local debugBtn = makeButton("DEBUG", UDim2.fromOffset(80, 26), UDim2.new(0.5, -40, 0, 2), screenGui)
@@ -169,6 +189,7 @@ local debugItems = {
 	{ "♠3 を追加",    "addSpade3" },
 	{ "Joker を追加",  "addJoker"  },
 	{ "10 を 4 枚追加", "add4x10"  },
+	{ "全員 残り1枚",  "allTo1"    },
 }
 
 for _, item in ipairs(debugItems) do
@@ -200,6 +221,9 @@ local myHand        = {}   -- 現在の手札
 local selectedCards = {}   -- 選択中のカード（suit+number で識別）
 local isMyTurn      = false
 local cardButtons   = {}   -- カードボタンの参照
+local exchangeMode  = false  -- 階級交換モード
+local exchangeInfo  = nil    -- { mustGiveCount, targetName }
+local cachedPlayers = {}     -- プレイヤー名リスト（結果表示用）
 
 -- ============================================================
 -- カード選択管理
@@ -220,6 +244,18 @@ local function toggleSelect(card)
 	-- すでに選択済み → 解除
 	if selectedCards[key] then
 		selectedCards[key] = nil
+		return
+	end
+
+	-- 交換モード: 同じ数字制限なし、枚数制限のみ
+	if exchangeMode then
+		local count = 0
+		for _ in pairs(selectedCards) do count = count + 1 end
+		if exchangeInfo and count >= exchangeInfo.mustGiveCount then
+			-- 枚数上限 → 追加しない
+			return
+		end
+		selectedCards[key] = card
 		return
 	end
 
@@ -292,7 +328,7 @@ local function refreshCardButtons()
 
 		local capturedCard = card
 		btn.MouseButton1Click:Connect(function()
-			if not isMyTurn then return end
+			if not isMyTurn and not exchangeMode then return end
 			toggleSelect(capturedCard)
 			refreshCardButtons()
 		end)
@@ -306,10 +342,15 @@ local function refreshCardButtons()
 	-- カード上部「出す」ボタンの表示更新
 	local count = 0
 	for _ in pairs(selectedCards) do count = count + 1 end
-	local showQuick = isMyTurn and count > 0
+	local showQuick = (isMyTurn or exchangeMode) and count > 0
 	quickSubmitBtn.Visible = showQuick
 	if showQuick then
-		quickSubmitBtn.Text = "出す（" .. count .. "枚）"
+		if exchangeMode then
+			local need = exchangeInfo and exchangeInfo.mustGiveCount or 0
+			quickSubmitBtn.Text = "交換（" .. count .. "/" .. need .. "枚）"
+		else
+			quickSubmitBtn.Text = "出す（" .. count .. "枚）"
+		end
 
 		-- AbsolutePosition はフレーム描画後に確定するため次フレームで計算
 		task.defer(function()
@@ -400,12 +441,15 @@ end
 GameStateSync.OnClientEvent:Connect(function(data)
 	myHand = data.hand or {}
 
-	-- ターン表示
+	-- ターン表示（ラウンド番号込み）
 	local isMyTurnNow = (data.turn == localPlayer.Name)
 	isMyTurn = isMyTurnNow
-	turnLabel.Text = isMyTurnNow
-		and "★ あなたのターン"
-		or  "ターン: " .. (data.turn or "-")
+	local roundStr = "R" .. (data.roundNumber or 1) .. "/4  "
+	if isMyTurnNow then
+		turnLabel.Text = roundStr .. "★ あなたのターン"
+	else
+		turnLabel.Text = roundStr .. "ターン: " .. (data.turn or "-")
+	end
 
 	-- 革命表示
 	revolutionLabel.Text = data.isRevolution and "🔥 革命中！" or ""
@@ -424,7 +468,7 @@ GameStateSync.OnClientEvent:Connect(function(data)
 	-- 相手の手札枚数（手番プレイヤーをハイライト）
 	refreshOpponents(data.players, data.turn)
 
-	-- 順位表示（rankings は playerName の配列として扱う、Phase 1 簡易版）
+	-- 順位表示 + スコア
 	if #data.rankings > 0 then
 		local rankNames = { "大富豪", "富豪", "貧民", "大貧民" }
 		local parts = {}
@@ -433,6 +477,38 @@ GameStateSync.OnClientEvent:Connect(function(data)
 		end
 		rankingsLabel.Text = "上がり順: " .. table.concat(parts, " → ")
 		rankingsLabel.Visible = true
+	end
+
+	-- スコア表示（rankingsLabel の下に追記）
+	if data.scores then
+		-- scores は playerId(数値) -> 点。players配列の順で取得
+		local scoreTexts = {}
+		for i, p in ipairs(data.players) do
+			local sc = data.scores[i] or 0
+			table.insert(scoreTexts, p.name .. ":" .. sc .. "pt")
+		end
+		if #scoreTexts > 0 then
+			local existing = rankingsLabel.Text
+			if existing ~= "" then
+				rankingsLabel.Text = existing .. "    " .. table.concat(scoreTexts, "  ")
+			else
+				rankingsLabel.Text = table.concat(scoreTexts, "  ")
+				rankingsLabel.Visible = true
+			end
+		end
+	end
+
+	-- プレイヤー名キャッシュ更新（結果表示用）
+	cachedPlayers = {}
+	for _, p in ipairs(data.players) do
+		table.insert(cachedPlayers, p.name)
+	end
+
+	-- 交換情報の更新
+	if data.exchangeInfo then
+		exchangeInfo = data.exchangeInfo
+	else
+		exchangeInfo = nil
 	end
 
 	-- 通知表示（革命・反則あがりなど）
@@ -447,11 +523,13 @@ GameStateSync.OnClientEvent:Connect(function(data)
 	-- 手札を再描画（選択状態を維持）
 	refreshCardButtons()
 
-	-- ボタン有効/無効
-	setButtonsEnabled(isMyTurnNow)
+	-- ボタン有効/無効（交換モード中はボタン制御しない）
+	if not exchangeMode then
+		setButtonsEnabled(isMyTurnNow)
+	end
 
-	-- 自分のターンでなければ選択をリセット
-	if not isMyTurnNow then
+	-- 自分のターンでなく交換モードでもなければ選択をリセット
+	if not isMyTurnNow and not exchangeMode then
 		clearSelection()
 	end
 end)
@@ -461,12 +539,87 @@ end)
 -- ============================================================
 
 GamePhaseChanged.OnClientEvent:Connect(function(data)
-	if data.phase == "result" then
-		messageLabel.Text = "ゲーム終了！"
+	if data.phase == "dealing" then
+		-- ラウンド開始
+		resultFrame.Visible = false
+		messageLabel.Text = "ラウンド " .. (data.roundNumber or "") .. " カード配布中…"
 		messageLabel.Visible = true
 		setButtonsEnabled(false)
-	elseif data.phase == "playing" then
+		exchangeMode = false
+		exchangeInfo = nil
+		clearSelection()
+
+	elseif data.phase == "cardExchange" then
+		-- 階級交換フェーズ
+		resultFrame.Visible = false
 		messageLabel.Visible = false
+		if exchangeInfo and exchangeInfo.mustGiveCount then
+			-- 上位プレイヤー: カードを選んで交換
+			exchangeMode = true
+			messageLabel.Text = exchangeInfo.targetName .. " に " .. exchangeInfo.mustGiveCount .. " 枚渡してください"
+			messageLabel.Visible = true
+			submitBtn.Text = "交換する"
+			submitBtn.BackgroundColor3 = Color3.fromRGB(60, 120, 200)
+			submitBtn.Active = true
+			passBtn.Visible = false
+		else
+			-- 下位プレイヤー or 関係ないプレイヤー: 待機
+			exchangeMode = false
+			messageLabel.Text = "階級交換中…"
+			messageLabel.Visible = true
+			setButtonsEnabled(false)
+		end
+		clearSelection()
+		refreshCardButtons()
+
+	elseif data.phase == "playing" then
+		-- ゲーム中
+		resultFrame.Visible = false
+		messageLabel.Visible = false
+		exchangeMode = false
+		exchangeInfo = nil
+		submitBtn.Text = "出す"
+		passBtn.Visible = true
+
+	elseif data.phase == "result" then
+		-- ラウンド結果表示
+		setButtonsEnabled(false)
+		exchangeMode = false
+		local rn = data.roundNumber or 0
+		resultTitle.Text = "ラウンド " .. rn .. " 結果"
+
+		local lines = {}
+		if data.roundResult then
+			for _, entry in ipairs(data.roundResult) do
+				table.insert(lines, entry.rank .. ": " .. entry.name .. "  (+" .. entry.points .. "pt)")
+			end
+		end
+		-- 累計スコア
+		if data.scores then
+			table.insert(lines, "")
+			table.insert(lines, "--- 累計スコア ---")
+			for i, p in ipairs(cachedPlayers) do
+				local sc = data.scores[i] or 0
+				table.insert(lines, p .. ": " .. sc .. "pt")
+			end
+		end
+		resultBody.Text = table.concat(lines, "\n")
+		resultFrame.Visible = true
+
+	elseif data.phase == "finalResult" then
+		-- セット最終結果
+		setButtonsEnabled(false)
+		exchangeMode = false
+		resultTitle.Text = "最終結果"
+
+		local lines = {}
+		if data.finalRanking then
+			for i, entry in ipairs(data.finalRanking) do
+				table.insert(lines, i .. "位: " .. entry.name .. "  " .. entry.score .. "pt")
+			end
+		end
+		resultBody.Text = table.concat(lines, "\n")
+		resultFrame.Visible = true
 	end
 end)
 
@@ -474,29 +627,29 @@ end)
 -- ボタン操作
 -- ============================================================
 
-quickSubmitBtn.MouseButton1Click:Connect(function()
-	if not isMyTurn then return end
-
+local function doSubmit()
 	local cards = getSelectedList()
 	if #cards == 0 then return end
 
-	clearSelection()
-	refreshCardButtons()
+	if exchangeMode then
+		-- 交換モード: 必要枚数チェック
+		if not exchangeInfo or #cards ~= exchangeInfo.mustGiveCount then return end
+		clearSelection()
+		exchangeMode = false
+		refreshCardButtons()
+		CardExchange:FireServer({ cards = cards })
+		messageLabel.Text = "交換完了 待機中…"
+		setButtonsEnabled(false)
+	else
+		if not isMyTurn then return end
+		clearSelection()
+		refreshCardButtons()
+		PlayerAction:FireServer({ type = "play", cards = cards })
+	end
+end
 
-	PlayerAction:FireServer({ type = "play", cards = cards })
-end)
-
-submitBtn.MouseButton1Click:Connect(function()
-	if not isMyTurn then return end
-
-	local cards = getSelectedList()
-	if #cards == 0 then return end
-
-	clearSelection()
-	refreshCardButtons()
-
-	PlayerAction:FireServer({ type = "play", cards = cards })
-end)
+quickSubmitBtn.MouseButton1Click:Connect(doSubmit)
+submitBtn.MouseButton1Click:Connect(doSubmit)
 
 passBtn.MouseButton1Click:Connect(function()
 	if not isMyTurn then return end

@@ -153,6 +153,16 @@ function CardData.sortHand(hand, isRevolution)
 	return sorted
 end
 
+-- 手札から最強の N 枚を返す（階級交換で下位プレイヤー用）
+function CardData.getStrongestCards(hand, count, isRevolution)
+	local sorted = CardData.sortHand(hand, isRevolution)
+	local result = {}
+	for i = math.max(1, #sorted - count + 1), #sorted do
+		table.insert(result, sorted[i])
+	end
+	return result
+end
+
 -- ============================================================
 -- 特殊ルール判定
 -- ============================================================

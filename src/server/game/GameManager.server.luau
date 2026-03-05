@@ -23,13 +23,18 @@ local PlayerAction    = makeEvent("PlayerAction")
 local GameStateSync   = makeEvent("GameStateSync")
 local GamePhaseChanged = makeEvent("GamePhaseChanged")
 local DebugAction     = makeEvent("DebugAction")
+local CardExchange    = makeEvent("CardExchange")
 
 -- ============================================================
 -- 定数
 -- ============================================================
 
 local PLAYER_COUNT = 4
-local NPC_THINK_TIME = 0.8  -- NPC が「考える」演出の秒数
+local NPC_THINK_TIME = 0.8              -- NPC が「考える」演出の秒数
+local TOTAL_ROUNDS = 4
+local ROUND_POINTS       = { 50, 30, 10, 0 }   -- 1〜3ラウンド目
+local FINAL_ROUND_POINTS = { 70, 30, 10, 0 }   -- 4ラウンド目
+local RESULT_DISPLAY_SEC = 5                    -- 結果表示秒数
 
 -- ============================================================
 -- 状態
@@ -49,12 +54,21 @@ local state = {
 	foulRankings  = {},       -- 反則あがり順（ゲーム終了時に末尾に追加）
 	isRevolution  = false,
 	notification  = nil,      -- クライアントへの通知メッセージ（送信後クリア）
+	roundNumber   = 1,        -- 現在のラウンド (1-4)
+	scores        = {},       -- {[playerId] = 累計ポイント}
+	prevRankings  = {},       -- 前ラウンドの rankings（階級交換ペア決定用）
+	exchangeState = nil,      -- 交換中の状態 { pending = {[playerId]={targetId,count}} }
 	rules = {                 -- 特殊ルール設定（Phase 5 でロビーから上書き）
 		revolution = true,
 		eightCut   = true,
 		spade3     = true,
 	},
 }
+
+-- 前方宣言（ラウンドループで相互参照するため）
+local startNextRound
+local startCardExchange
+local completeExchange
 
 -- ============================================================
 -- ユーティリティ
@@ -117,6 +131,19 @@ local function syncAll()
 	for _, p in ipairs(state.players) do
 		local rp = getRobloxPlayer(p)
 		if rp then
+			-- 交換フェーズ中の個別情報
+			local exInfo = nil
+			if state.exchangeState then
+				local pending = state.exchangeState.pending[p.id]
+				if pending then
+					local target = getPlayer(pending.targetId)
+					exInfo = {
+						mustGiveCount = pending.count,
+						targetName    = target and target.name or "",
+					}
+				end
+			end
+
 			GameStateSync:FireClient(rp, {
 				hand         = state.hands[p.id] or {},
 				field        = state.field,
@@ -126,16 +153,25 @@ local function syncAll()
 				isRevolution = state.isRevolution,
 				rankings     = state.rankings,
 				notification = notification,
+				roundNumber  = state.roundNumber,
+				scores       = state.scores,
+				exchangeInfo = exInfo,
 			})
 		end
 	end
 end
 
-local function broadcastPhase(phase)
+local function broadcastPhase(phase, extraData)
+	local data = { phase = phase }
+	if extraData then
+		for k, v in pairs(extraData) do
+			data[k] = v
+		end
+	end
 	for _, p in ipairs(state.players) do
 		local rp = getRobloxPlayer(p)
 		if rp then
-			GamePhaseChanged:FireClient(rp, { phase = phase })
+			GamePhaseChanged:FireClient(rp, data)
 		end
 	end
 end
@@ -219,7 +255,15 @@ local function handleFoulWin(playerId)
 	state.notification = p.name .. " が反則あがり！最下位になりました"
 end
 
--- ゲーム終了判定。終了なら true を返す
+-- ラウンドのポイント加算
+local function addRoundPoints(rankings, roundNumber)
+	local pts = (roundNumber == TOTAL_ROUNDS) and FINAL_ROUND_POINTS or ROUND_POINTS
+	for i, playerId in ipairs(rankings) do
+		state.scores[playerId] = (state.scores[playerId] or 0) + (pts[i] or 0)
+	end
+end
+
+-- ラウンド終了判定。終了なら true を返す
 local function checkGameEnd()
 	local active = getActivePlayers()
 	if #active <= 1 then
@@ -230,9 +274,51 @@ local function checkGameEnd()
 		for _, foulId in ipairs(state.foulRankings) do
 			table.insert(state.rankings, foulId)
 		end
+
+		-- ポイント加算
+		addRoundPoints(state.rankings, state.roundNumber)
+
+		-- ラウンド結果データを構築
+		local rankNames = { "大富豪", "富豪", "貧民", "大貧民" }
+		local pts = (state.roundNumber == TOTAL_ROUNDS) and FINAL_ROUND_POINTS or ROUND_POINTS
+		local roundResult = {}
+		for i, pid in ipairs(state.rankings) do
+			local p = getPlayer(pid)
+			table.insert(roundResult, {
+				name   = p and p.name or "?",
+				rank   = rankNames[i] or tostring(i),
+				points = pts[i] or 0,
+			})
+		end
+
 		state.phase = "result"
-		broadcastPhase("result")
+		broadcastPhase("result", {
+			roundNumber = state.roundNumber,
+			roundResult = roundResult,
+			scores      = state.scores,
+		})
 		syncAll()
+
+		-- 次ラウンドへ自動遷移 or 最終結果
+		if state.roundNumber < TOTAL_ROUNDS then
+			task.delay(RESULT_DISPLAY_SEC, function()
+				startNextRound()
+			end)
+		else
+			task.delay(RESULT_DISPLAY_SEC, function()
+				state.phase = "finalResult"
+				-- スコア降順で最終順位を計算
+				local finalRanking = {}
+				for _, p in ipairs(state.players) do
+					table.insert(finalRanking, { name = p.name, score = state.scores[p.id] or 0 })
+				end
+				table.sort(finalRanking, function(a, b) return a.score > b.score end)
+				broadcastPhase("finalResult", {
+					finalRanking = finalRanking,
+					scores       = state.scores,
+				})
+			end)
+		end
 		return true
 	end
 	return false
@@ -448,16 +534,23 @@ end
 -- カード配布
 -- ============================================================
 
-local function dealCards()
+-- startPlayerId: 配布開始プレイヤー（余りカードが最初に渡る。nil なら player[1]）
+local function dealCards(startPlayerId)
 	local deck = CardData.shuffle(CardData.createDeck())
 	for _, p in ipairs(state.players) do
 		state.hands[p.id] = {}
 	end
-	-- ラウンドロビンで配る
+	-- 開始位置を決定
+	local startIdx = 1
+	if startPlayerId then
+		for i, p in ipairs(state.players) do
+			if p.id == startPlayerId then startIdx = i; break end
+		end
+	end
+	-- ラウンドロビンで配る（startIdx のプレイヤーから開始）
 	for i, card in ipairs(deck) do
-		local idx      = ((i - 1) % PLAYER_COUNT) + 1
-		local playerId = state.players[idx].id
-		table.insert(state.hands[playerId], card)
+		local idx = ((startIdx - 2 + i) % PLAYER_COUNT) + 1
+		table.insert(state.hands[state.players[idx].id], card)
 	end
 	-- 各プレイヤーの手札をソート
 	for _, p in ipairs(state.players) do
@@ -478,6 +571,133 @@ local function findDiamondThree()
 end
 
 -- ============================================================
+-- ラウンドループ・階級交換
+-- ============================================================
+
+-- 交換完了 → ♦3保持者から playing 開始
+completeExchange = function()
+	state.exchangeState = nil
+	-- 全手札をソート
+	for _, p in ipairs(state.players) do
+		state.hands[p.id] = CardData.sortHand(state.hands[p.id], false)
+	end
+	-- ♦3 保持者から開始
+	state.currentId = findDiamondThree()
+	state.phase     = "playing"
+	broadcastPhase("playing")
+	syncAll()
+	-- 最初のターンが NPC なら自動処理
+	local first = getPlayer(state.currentId)
+	if first and first.isNPC then
+		task.spawn(function()
+			processNpcTurn(state.currentId)
+		end)
+	end
+end
+
+-- 階級交換を開始（下位→上位の自動転送 + 上位の選択待ち）
+startCardExchange = function()
+	local prev = state.prevRankings
+	if #prev < PLAYER_COUNT then
+		completeExchange()
+		return
+	end
+
+	local daifugoId    = prev[1]  -- 大富豪
+	local fugoId       = prev[2]  -- 富豪
+	local hinminId     = prev[3]  -- 貧民
+	local daihinminId  = prev[4]  -- 大貧民
+
+	-- Phase A: 下位 → 上位の自動転送
+	-- 大貧民 → 大富豪: 最強2枚
+	local strongest2 = CardData.getStrongestCards(state.hands[daihinminId], 2, false)
+	state.hands[daihinminId] = removeCards(state.hands[daihinminId], strongest2)
+	for _, c in ipairs(strongest2) do
+		table.insert(state.hands[daifugoId], c)
+	end
+	state.hands[daifugoId] = CardData.sortHand(state.hands[daifugoId], false)
+
+	-- 貧民 → 富豪: 最強1枚
+	local strongest1 = CardData.getStrongestCards(state.hands[hinminId], 1, false)
+	state.hands[hinminId] = removeCards(state.hands[hinminId], strongest1)
+	for _, c in ipairs(strongest1) do
+		table.insert(state.hands[fugoId], c)
+	end
+	state.hands[fugoId] = CardData.sortHand(state.hands[fugoId], false)
+
+	-- Phase B: 上位 → 下位の選択
+	state.exchangeState = { pending = {} }
+
+	-- 大富豪: 2枚選択
+	local daifugo = getPlayer(daifugoId)
+	if daifugo.isNPC then
+		local sorted = CardData.sortHand(state.hands[daifugoId], false)
+		local weakest = {}
+		for i = 1, math.min(2, #sorted) do table.insert(weakest, sorted[i]) end
+		state.hands[daifugoId] = removeCards(state.hands[daifugoId], weakest)
+		for _, c in ipairs(weakest) do table.insert(state.hands[daihinminId], c) end
+	else
+		state.exchangeState.pending[daifugoId] = { targetId = daihinminId, count = 2 }
+	end
+
+	-- 富豪: 1枚選択
+	local fugo = getPlayer(fugoId)
+	if fugo.isNPC then
+		local sorted = CardData.sortHand(state.hands[fugoId], false)
+		local weakest = { sorted[1] }
+		state.hands[fugoId] = removeCards(state.hands[fugoId], weakest)
+		for _, c in ipairs(weakest) do table.insert(state.hands[hinminId], c) end
+	else
+		state.exchangeState.pending[fugoId] = { targetId = hinminId, count = 1 }
+	end
+
+	-- 全員 NPC なら即完了、人間がいれば交換フェーズへ
+	local hasPending = false
+	for _ in pairs(state.exchangeState.pending) do hasPending = true; break end
+
+	if not hasPending then
+		completeExchange()
+	else
+		state.phase = "cardExchange"
+		broadcastPhase("cardExchange")
+		syncAll()
+	end
+end
+
+-- 次のラウンドを開始
+startNextRound = function()
+	state.roundNumber = state.roundNumber + 1
+	-- 前ラウンドの順位を保存
+	state.prevRankings = {}
+	for _, pid in ipairs(state.rankings) do
+		table.insert(state.prevRankings, pid)
+	end
+
+	-- ラウンド状態リセット
+	state.rankings     = {}
+	state.foulRankings = {}
+	state.field        = {}
+	state.fieldOwnerId = nil
+	state.passCount    = 0
+	state.isRevolution = false
+	state.notification = nil
+	state.exchangeState = nil
+	for _, p in ipairs(state.players) do
+		p.isFinished = false
+	end
+
+	-- 大貧民（前ラウンド4位）から配布
+	local daihinminId = state.prevRankings[PLAYER_COUNT]
+	dealCards(daihinminId)
+
+	state.phase = "dealing"
+	broadcastPhase("dealing", { roundNumber = state.roundNumber })
+
+	-- 階級交換へ
+	startCardExchange()
+end
+
+-- ============================================================
 -- ゲーム開始
 -- ============================================================
 
@@ -488,14 +708,21 @@ local function startGame(humanPlayer)
 		{ id = 3, name = "NPC_B",           isNPC = true,  isFinished = false },
 		{ id = 4, name = "NPC_C",           isNPC = true,  isFinished = false },
 	}
-	state.hands        = {}
-	state.field        = {}
-	state.fieldOwnerId = nil
-	state.passCount    = 0
-	state.rankings     = {}
-	state.foulRankings = {}
-	state.isRevolution = false
-	state.notification = nil
+	state.hands         = {}
+	state.field         = {}
+	state.fieldOwnerId  = nil
+	state.passCount     = 0
+	state.rankings      = {}
+	state.foulRankings  = {}
+	state.isRevolution  = false
+	state.notification  = nil
+	state.roundNumber   = 1
+	state.prevRankings  = {}
+	state.exchangeState = nil
+	state.scores        = {}
+	for _, p in ipairs(state.players) do
+		state.scores[p.id] = 0
+	end
 
 	dealCards()
 
@@ -557,6 +784,59 @@ PlayerAction.OnServerEvent:Connect(function(robloxPlayer, data)
 end)
 
 -- ============================================================
+-- 階級交換ハンドラ
+-- ============================================================
+
+CardExchange.OnServerEvent:Connect(function(robloxPlayer, data)
+	if state.phase ~= "cardExchange" then return end
+	if not state.exchangeState then return end
+
+	local playerInfo = nil
+	for _, p in ipairs(state.players) do
+		if not p.isNPC and p.name == robloxPlayer.Name then
+			playerInfo = p
+			break
+		end
+	end
+	if not playerInfo then return end
+
+	local pending = state.exchangeState.pending[playerInfo.id]
+	if not pending then return end
+
+	local cards = data.cards
+	if not cards or #cards ~= pending.count then
+		warn("[GameManager] Invalid exchange count from " .. robloxPlayer.Name)
+		syncAll()
+		return
+	end
+
+	if not handContains(state.hands[playerInfo.id], cards) then
+		warn("[GameManager] Exchange cards not in hand: " .. robloxPlayer.Name)
+		syncAll()
+		return
+	end
+
+	-- カードを転送
+	state.hands[playerInfo.id] = removeCards(state.hands[playerInfo.id], cards)
+	for _, c in ipairs(cards) do
+		table.insert(state.hands[pending.targetId], c)
+	end
+
+	-- pending から削除
+	state.exchangeState.pending[playerInfo.id] = nil
+
+	-- 全員完了チェック
+	local hasPending = false
+	for _ in pairs(state.exchangeState.pending) do hasPending = true; break end
+
+	if not hasPending then
+		completeExchange()
+	else
+		syncAll()
+	end
+end)
+
+-- ============================================================
 -- デバッグ用ハンドラ
 -- ============================================================
 
@@ -599,6 +879,18 @@ DebugAction.OnServerEvent:Connect(function(robloxPlayer, actionType)
 				return card.number == 10 and card.suit ~= CardData.SUIT.JOKER
 			end)
 			if c then table.insert(state.hands[myId], c); added = true end
+		end
+
+	elseif actionType == "allTo1" then
+		-- 全プレイヤーの手札を1枚だけ残す
+		for _, p in ipairs(state.players) do
+			if not p.isFinished then
+				local hand = state.hands[p.id]
+				if hand and #hand > 1 then
+					state.hands[p.id] = { hand[1] }
+					added = true
+				end
+			end
 		end
 	end
 
