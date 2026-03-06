@@ -119,12 +119,20 @@ local function syncAll()
 	local notification = state.notification
 	state.notification = nil  -- 1回送信したらクリア
 
+	-- 各プレイヤーの順位マップを作成
+	local rankMap = {}
+	local rankNames = { "大富豪", "富豪", "貧民", "大貧民" }
+	for i, pid in ipairs(state.rankings) do
+		rankMap[pid] = rankNames[i] or (tostring(i) .. "位")
+	end
+
 	local playerList = {}
 	for _, p in ipairs(state.players) do
 		table.insert(playerList, {
 			name        = p.name,
 			handCount   = #(state.hands[p.id] or {}),
 			isFinished  = p.isFinished,
+			rank        = rankMap[p.id],  -- 上がり済みなら "大富豪" 等、未確定なら nil
 		})
 	end
 

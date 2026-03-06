@@ -434,7 +434,7 @@ local function refreshOpponents(players, currentTurn)
 		local label = Instance.new("TextLabel")
 		label.Size     = UDim2.new(1 / #others, -4, 1, 0)
 		label.Position = UDim2.new((i - 1) / #others, 2, 0, 0)
-		local status = p.isFinished and "（上がり）" or (tostring(p.handCount) .. "枚")
+		local status = p.rank and ("(" .. p.rank .. ")") or (p.isFinished and "（上がり）" or (tostring(p.handCount) .. "枚"))
 		label.Text     = (isCurrentTurn and "▶ " or "") .. p.name .. ": " .. status
 		label.BackgroundColor3 = isCurrentTurn
 			and Color3.fromRGB(80, 190, 220)   -- 手番中: 水色
@@ -465,14 +465,23 @@ end
 GameStateSync.OnClientEvent:Connect(function(data)
 	myHand = data.hand or {}
 
-	-- ターン表示（ラウンド番号込み）
+	-- ターン表示（ラウンド番号・自分の順位込み）
 	local isMyTurnNow = (data.turn == localPlayer.Name)
 	isMyTurn = isMyTurnNow
 	local roundStr = "R" .. (data.roundNumber or 1) .. "/4  "
+	-- 自分の順位を取得
+	local myRank = nil
+	for _, p in ipairs(data.players) do
+		if p.name == localPlayer.Name and p.rank then
+			myRank = p.rank
+			break
+		end
+	end
+	local myRankStr = myRank and ("  [" .. myRank .. "]") or ""
 	if isMyTurnNow then
-		turnLabel.Text = roundStr .. "★ あなたのターン"
+		turnLabel.Text = roundStr .. "★ あなたのターン" .. myRankStr
 	else
-		turnLabel.Text = roundStr .. "ターン: " .. (data.turn or "-")
+		turnLabel.Text = roundStr .. "ターン: " .. (data.turn or "-") .. myRankStr
 	end
 
 	-- 革命表示
