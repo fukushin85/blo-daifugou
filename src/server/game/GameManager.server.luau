@@ -406,9 +406,9 @@ local function doPlay(playerId, cards)
 			if checkGameEnd() then return end
 			state.currentId = getNextActiveId(playerId)
 		end
-	elseif isEightCutPlay then
-		-- 8切り: 出したカードを一度表示してから場リセット
-		local notif = "8切り！"
+	elseif isEightCutPlay or isSpade3ReturnPlay then
+		-- 8切り / スペ3返し: 出したカードを一度表示してから場リセット
+		local notif = isEightCutPlay and "8切り！" or "スペ3返し！"
 		state.notification = state.notification and (state.notification .. "  " .. notif) or notif
 		state.currentId = playerId
 		syncAll()
@@ -911,6 +911,62 @@ DebugAction.OnServerEvent:Connect(function(robloxPlayer, actionType)
 				end
 			end
 		end
+
+	elseif actionType == "foul2" then
+		-- 反則あがりテスト: 手札を2のカード1枚だけにする
+		local c = stealCard(myId, function(card) return card.number == 2 and card.suit ~= CardData.SUIT.JOKER end)
+		if c then state.hands[myId] = { c }; added = true end
+
+	elseif actionType == "foul8" then
+		-- 反則あがりテスト: 手札を8のカード1枚だけにする
+		local c = stealCard(myId, function(card) return card.number == 8 and card.suit ~= CardData.SUIT.JOKER end)
+		if c then state.hands[myId] = { c }; added = true end
+
+	elseif actionType == "foulSpade3" then
+		-- 反則あがりテスト: 手札を♠3だけにし、場にジョーカーを置く
+		local c = stealCard(myId, function(card) return card.suit == CardData.SUIT.SPADE and card.number == 3 end)
+		if c then
+			state.hands[myId] = { c }
+			state.field = {{ suit = CardData.SUIT.JOKER, number = 0 }}
+			state.fieldOwnerId = getNextActiveId(myId)
+			added = true
+		end
+
+	elseif actionType == "foulJoker" then
+		-- 反則あがりテスト: 手札をジョーカー1枚だけにする
+		local c = stealCard(myId, function(card) return card.suit == CardData.SUIT.JOKER end)
+		if c then state.hands[myId] = { c }; added = true end
+
+	elseif actionType == "foulAll8" then
+		-- 反則あがり連鎖テスト: 全員の手札を8のカード1枚だけにする
+		local eights = {}
+		for _, p in ipairs(state.players) do
+			if not p.isFinished then
+				for _, card in ipairs(state.hands[p.id]) do
+					if card.number == 8 and card.suit ~= CardData.SUIT.JOKER then
+						table.insert(eights, card)
+					end
+				end
+			end
+		end
+		local idx = 1
+		for _, p in ipairs(state.players) do
+			if not p.isFinished and idx <= #eights then
+				state.hands[p.id] = { eights[idx] }
+				idx = idx + 1
+				added = true
+			end
+		end
+		-- 場をリセットして確実に出せるようにする
+		state.field = {}
+		state.fieldOwnerId = nil
+		state.passCount = 0
+
+	elseif actionType == "foulRev3" then
+		-- 反則あがりテスト: 革命を発動し、手札を3のカード1枚だけにする
+		state.isRevolution = true
+		local c = stealCard(myId, function(card) return card.number == 3 and card.suit ~= CardData.SUIT.JOKER end)
+		if c then state.hands[myId] = { c }; added = true end
 	end
 
 	if added then

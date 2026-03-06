@@ -208,6 +208,12 @@ local debugItems = {
 	{ "Joker を追加",  "addJoker"  },
 	{ "10 を 4 枚追加", "add4x10"  },
 	{ "全員 残り1枚",  "allTo1"    },
+	{ "反則: 2で上がり",      "foul2"       },
+	{ "反則: 8切りで上がり",  "foul8"       },
+	{ "反則: スペ3で上がり",  "foulSpade3"  },
+	{ "反則: Jokerで上がり",  "foulJoker"   },
+	{ "反則: 全員8で1枚",    "foulAll8"    },
+	{ "反則: 革命+3で上がり", "foulRev3"   },
 }
 
 for _, item in ipairs(debugItems) do
