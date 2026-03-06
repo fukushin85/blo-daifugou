@@ -296,6 +296,7 @@ local function checkGameEnd()
 			roundNumber = state.roundNumber,
 			roundResult = roundResult,
 			scores      = state.scores,
+			displaySec  = RESULT_DISPLAY_SEC,
 		})
 		syncAll()
 
@@ -434,6 +435,7 @@ local function doPass(playerId)
 	local passesNeeded = ownerActive and (#active - 1) or #active
 
 	if state.passCount >= passesNeeded then
+		state.notification = "場が流れました"
 		state.field       = {}
 		state.passCount   = 0
 		state.currentId   = ownerActive and state.fieldOwnerId or getNextActiveId(playerId)

@@ -4,10 +4,13 @@
 
 local Players          = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService     = game:GetService("TweenService")
 
 local CardData = require(ReplicatedStorage.Shared.game.CardData)
 
 local localPlayer = Players.LocalPlayer
+
+local NOTIF_DISPLAY_SEC = 1.5  -- 通知ラベルの表示秒数
 
 -- RemoteEvent（GameManager が生成するまで待つ）
 local function waitForEvent(name)
@@ -151,10 +154,25 @@ local resultTitle = makeLabel("", UDim2.new(1, 0, 0.15, 0), UDim2.new(0, 0, 0, 0
 	Color3.fromRGB(40, 40, 80))
 resultTitle.ZIndex = 16
 
-local resultBody = makeLabel("", UDim2.new(1, 0, 0.85, 0), UDim2.new(0, 0, 0.15, 0), resultFrame,
+local resultBody = makeLabel("", UDim2.new(1, 0, 0.78, 0), UDim2.new(0, 0, 0.15, 0), resultFrame,
 	Color3.fromRGB(20, 20, 40))
 resultBody.ZIndex = 16
 resultBody.TextYAlignment = Enum.TextYAlignment.Top
+
+-- タイマーバー（result 下部に表示）
+local timerBarBg = Instance.new("Frame")
+timerBarBg.Size = UDim2.new(0.9, 0, 0.04, 0)
+timerBarBg.Position = UDim2.new(0.05, 0, 0.93, 0)
+timerBarBg.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+timerBarBg.ZIndex = 16
+timerBarBg.Parent = resultFrame
+
+local timerBar = Instance.new("Frame")
+timerBar.Size = UDim2.new(1, 0, 1, 0)
+timerBar.Position = UDim2.new(0, 0, 0, 0)
+timerBar.BackgroundColor3 = Color3.fromRGB(100, 180, 255)
+timerBar.ZIndex = 17
+timerBar.Parent = timerBarBg
 
 -- ---- デバッグUI ----
 
@@ -518,7 +536,7 @@ GameStateSync.OnClientEvent:Connect(function(data)
 	if data.notification and data.notification ~= "" then
 		notifLabel.Text = data.notification
 		notifLabel.Visible = true
-		task.delay(3, function()
+		task.delay(NOTIF_DISPLAY_SEC, function()
 			notifLabel.Visible = false
 		end)
 	end
@@ -609,6 +627,15 @@ GamePhaseChanged.OnClientEvent:Connect(function(data)
 		resultBody.Text = table.concat(lines, "\n")
 		resultFrame.Visible = true
 
+		-- タイマーバーアニメーション
+		local sec = data.displaySec or 5
+		timerBar.Size = UDim2.new(1, 0, 1, 0)
+		timerBarBg.Visible = true
+		local tween = TweenService:Create(timerBar,
+			TweenInfo.new(sec, Enum.EasingStyle.Linear),
+			{ Size = UDim2.new(0, 0, 1, 0) })
+		tween:Play()
+
 	elseif data.phase == "finalResult" then
 		-- セット最終結果
 		setButtonsEnabled(false)
@@ -622,6 +649,7 @@ GamePhaseChanged.OnClientEvent:Connect(function(data)
 			end
 		end
 		resultBody.Text = table.concat(lines, "\n")
+		timerBarBg.Visible = false
 		resultFrame.Visible = true
 	end
 end)
