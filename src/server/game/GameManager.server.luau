@@ -402,11 +402,20 @@ local function doPlay(playerId, cards)
 			state.currentId = getNextActiveId(playerId)
 		end
 	elseif isEightCutPlay then
-		-- 8切り: 場リセット・同プレイヤーが続行
-		state.field        = {}
-		state.fieldOwnerId = nil
-		state.passCount    = 0
-		state.currentId    = playerId
+		-- 8切り: 出したカードを一度表示してから場リセット
+		local notif = "8切り！"
+		state.notification = state.notification and (state.notification .. "  " .. notif) or notif
+		state.currentId = playerId
+		syncAll()
+		-- 遅延で場リセット（NPC思考時間 0.8s より前に完了する）
+		task.delay(0.5, function()
+			if state.phase ~= "playing" then return end
+			state.field        = {}
+			state.fieldOwnerId = nil
+			state.passCount    = 0
+			syncAll()
+		end)
+		return
 	else
 		state.currentId = getNextActiveId(playerId)
 	end

@@ -468,34 +468,27 @@ GameStateSync.OnClientEvent:Connect(function(data)
 	-- 相手の手札枚数（手番プレイヤーをハイライト）
 	refreshOpponents(data.players, data.turn)
 
-	-- 順位表示 + スコア
+	-- 順位・スコア表示（毎回一括で組み立て）
+	local infoParts = {}
 	if #data.rankings > 0 then
 		local rankNames = { "大富豪", "富豪", "貧民", "大貧民" }
-		local parts = {}
+		local rParts = {}
 		for i = 1, #data.rankings do
-			table.insert(parts, (rankNames[i] or tostring(i)))
+			table.insert(rParts, (rankNames[i] or tostring(i)))
 		end
-		rankingsLabel.Text = "上がり順: " .. table.concat(parts, " → ")
-		rankingsLabel.Visible = true
+		table.insert(infoParts, "上がり順: " .. table.concat(rParts, " → "))
 	end
-
-	-- スコア表示（rankingsLabel の下に追記）
 	if data.scores then
-		-- scores は playerId(数値) -> 点。players配列の順で取得
 		local scoreTexts = {}
 		for i, p in ipairs(data.players) do
 			local sc = data.scores[i] or 0
 			table.insert(scoreTexts, p.name .. ":" .. sc .. "pt")
 		end
-		if #scoreTexts > 0 then
-			local existing = rankingsLabel.Text
-			if existing ~= "" then
-				rankingsLabel.Text = existing .. "    " .. table.concat(scoreTexts, "  ")
-			else
-				rankingsLabel.Text = table.concat(scoreTexts, "  ")
-				rankingsLabel.Visible = true
-			end
-		end
+		table.insert(infoParts, table.concat(scoreTexts, "  "))
+	end
+	if #infoParts > 0 then
+		rankingsLabel.Text = table.concat(infoParts, "    ")
+		rankingsLabel.Visible = true
 	end
 
 	-- プレイヤー名キャッシュ更新（結果表示用）
@@ -504,9 +497,19 @@ GameStateSync.OnClientEvent:Connect(function(data)
 		table.insert(cachedPlayers, p.name)
 	end
 
-	-- 交換情報の更新
+	-- 交換情報の更新（GamePhaseChanged より後に届く場合があるため、ここで交換モードを有効化）
 	if data.exchangeInfo then
 		exchangeInfo = data.exchangeInfo
+		if not exchangeMode and exchangeInfo.mustGiveCount then
+			exchangeMode = true
+			messageLabel.Text = exchangeInfo.targetName .. " に " .. exchangeInfo.mustGiveCount .. " 枚渡してください"
+			messageLabel.Visible = true
+			submitBtn.Text = "交換する"
+			submitBtn.BackgroundColor3 = Color3.fromRGB(60, 120, 200)
+			submitBtn.Active = true
+			passBtn.Visible = false
+			clearSelection()
+		end
 	else
 		exchangeInfo = nil
 	end
