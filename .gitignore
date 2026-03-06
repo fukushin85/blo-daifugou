@@ -1,9 +1,10 @@
-# Project place file
-/042_BLO_daifugou.rbxlx
+# Project place files (rojo build で生成)
+*.rbxlx
+*.rbxl
 
 # Roblox Studio lock files
-/*.rbxlx.lock
-/*.rbxl.lock
+*.rbxlx.lock
+*.rbxl.lock
 
 sourcemap.json
 
