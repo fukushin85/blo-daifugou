@@ -244,6 +244,10 @@ local function finishPlayer(playerId)
 	if not p or p.isFinished then return end
 	p.isFinished = true
 	table.insert(state.rankings, playerId)
+	local rankNames = { "大富豪", "富豪", "貧民", "大貧民" }
+	local rank = rankNames[#state.rankings] or tostring(#state.rankings) .. "位"
+	local notif = p.name .. " が上がり！（" .. rank .. "）"
+	state.notification = state.notification and (state.notification .. "  " .. notif) or notif
 end
 
 -- 反則あがり処理：強制最下位化
@@ -594,6 +598,8 @@ completeExchange = function()
 	end
 	-- ♦3 保持者から開始
 	state.currentId = findDiamondThree()
+	local starter = getPlayer(state.currentId)
+	state.notification = "♦3 を持つ " .. (starter and starter.name or "?") .. " からスタート"
 	state.phase     = "playing"
 	broadcastPhase("playing")
 	syncAll()
@@ -738,6 +744,8 @@ local function startGame(humanPlayer)
 	dealCards()
 
 	state.currentId = findDiamondThree()
+	local starter = getPlayer(state.currentId)
+	state.notification = "♦3 を持つ " .. (starter and starter.name or "?") .. " からスタート"
 	state.phase     = "playing"
 
 	broadcastPhase("playing")
