@@ -417,27 +417,22 @@ local function refreshCardButtons()
 end
 
 local function refreshOpponents(players, currentTurn)
-	-- 相手プレイヤー情報を更新
+	-- 全プレイヤー情報を更新（自分含む）
 	for _, child in ipairs(opponentFrame:GetChildren()) do
 		child:Destroy()
 	end
 
-	local others = {}
-	for _, p in ipairs(players) do
-		if p.name ~= localPlayer.Name then
-			table.insert(others, p)
-		end
-	end
-
-	for i, p in ipairs(others) do
+	for i, p in ipairs(players) do
 		local isCurrentTurn = (p.name == currentTurn)
+		local isMe = (p.name == localPlayer.Name)
 		local label = Instance.new("TextLabel")
-		label.Size     = UDim2.new(1 / #others, -4, 1, 0)
-		label.Position = UDim2.new((i - 1) / #others, 2, 0, 0)
+		label.Size     = UDim2.new(1 / #players, -4, 1, 0)
+		label.Position = UDim2.new((i - 1) / #players, 2, 0, 0)
 		local status = p.rank and ("(" .. p.rank .. ")") or (p.isFinished and "（上がり）" or (tostring(p.handCount) .. "枚"))
-		label.Text     = (isCurrentTurn and "▶ " or "") .. p.name .. ": " .. status
+		local nameStr = isMe and ("★" .. p.name) or p.name
+		label.Text     = (isCurrentTurn and "▶ " or "") .. nameStr .. ": " .. status
 		label.BackgroundColor3 = isCurrentTurn
-			and Color3.fromRGB(80, 190, 220)   -- 手番中: 水色
+			and (isMe and Color3.fromRGB(220, 100, 100) or Color3.fromRGB(80, 190, 220))
 			or  Color3.fromRGB(40, 40, 60)
 		label.BackgroundTransparency = isCurrentTurn and 0 or 0.3
 		label.TextColor3 = Color3.fromRGB(255, 255, 255)
